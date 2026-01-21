@@ -73,13 +73,19 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud (State Project)
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          credentials_json: ${{ secrets.GCP_SA_KEY_STATE }}
 
       - name: Setup gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
+
+      - name: Authenticate to Google Cloud (Environment Project)
+        id: auth-env
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets[format('GCP_SA_KEY_{0}', upper(matrix.workspace))] }}
 
       - name: Plan workspace
         id: plan
@@ -92,8 +98,8 @@ jobs:
             exit 1
           fi
           
-          # Initialize Terraform
-          echo "Initializing Terraform..."
+          # Initialize Terraform (uses state project credentials)
+          echo "Initializing Terraform with state project credentials..."
           terraform init || {
             echo "❌ Failed to initialize Terraform"
             exit 1
@@ -106,7 +112,7 @@ jobs:
             exit 1
           fi
           
-          # Plan
+          # Plan (uses environment project credentials)
           echo "Running plan for ${{ matrix.workspace }}..."
           if terraform plan \
             -var-file=${{ matrix.workspace }}.tfvars \

@@ -15,35 +15,66 @@ This Terraform configuration provisions all required GCP resources for the Codig
 
 This configuration uses **Terraform Workspaces** combined with environment-specific `tfvars` files to manage multiple environments (dev, qa, preprod, prod).
 
+### GCP Project Structure
+
+**IMPORTANT**: This setup requires **5 separate GCP projects**:
+
+1. **Terraform State Project**: Dedicated project for storing Terraform state in GCS
+   - Contains: GCS bucket for state files
+   - Used by: All environments
+   - Project ID: e.g., `terraform-state-project`
+
+2. **Dev Project**: Development environment resources
+   - Contains: GKE cluster, VPC, Artifact Registry, IAM, etc.
+   - Project ID: Configured in `dev.tfvars`
+
+3. **QA Project**: QA/Testing environment resources
+   - Contains: GKE cluster, VPC, Artifact Registry, IAM, etc.
+   - Project ID: Configured in `qa.tfvars`
+
+4. **Preprod Project**: Pre-production environment resources
+   - Contains: GKE cluster, VPC, Artifact Registry, IAM, etc.
+   - Project ID: Configured in `preprod.tfvars`
+
+5. **Prod Project**: Production environment resources
+   - Contains: GKE cluster, VPC, Artifact Registry, IAM, etc.
+   - Project ID: Configured in `prod.tfvars`
+
 ### Workspace Benefits
 
 - **Isolated State**: Each environment has its own state file in the backend
 - **Environment Separation**: Prevents accidental changes across environments
+- **Project Isolation**: Each environment uses a separate GCP project
 - **Easy Switching**: Switch between environments with a single command
 - **Shared Configuration**: Same Terraform code, different variable values
 
 ### Available Environments
 
-- `dev`: Development environment (1 node, lower resources)
-- `qa`: QA/Testing environment (2 nodes)
-- `preprod`: Pre-production environment (3 nodes)
-- `prod`: Production environment (4 nodes)
+- `dev`: Development environment (1 node, lower resources) - Uses `dev-project`
+- `qa`: QA/Testing environment (2 nodes) - Uses `qa-project`
+- `preprod`: Pre-production environment (3 nodes) - Uses `preprod-project`
+- `prod`: Production environment (4 nodes) - Uses `prod-project`
 
 ## Quick Start
 
 ### 1. Configure Backend
 
-This configuration uses a GCS backend for remote state storage.
+This configuration uses a GCS backend for remote state storage in a **dedicated GCP project**.
 
-1. Create the GCS bucket manually (one-time setup):
+**Prerequisites**: Create a separate GCP project for Terraform state storage (e.g., `terraform-state-project`)
+
+1. Create the GCS bucket manually in the state project (one-time setup):
 ```bash
-# Replace YOUR-PROJECT-ID with your actual GCP project ID
-gcloud storage buckets create gs://YOUR-PROJECT-ID-terraform-state \
+# Set the state project
+gcloud config set project terraform-state-project
+
+# Create the bucket
+gcloud storage buckets create gs://terraform-state-project-terraform-state \
   --location=us-central1 \
   --uniform-bucket-level-access
 
 # Enable versioning (recommended for state file history)
-gcloud storage buckets update gs://YOUR-PROJECT-ID-terraform-state \
+gcloud storage buckets update gs://terraform-state-project-terraform-state \
   --versioning
 ```
 
@@ -51,7 +82,7 @@ gcloud storage buckets update gs://YOUR-PROJECT-ID-terraform-state \
 ```hcl
 terraform {
   backend "gcs" {
-    bucket = "YOUR-PROJECT-ID-terraform-state"  # Use your actual bucket name
+    bucket = "terraform-state-project-terraform-state"  # Use your actual bucket name
     prefix = "terraform/state"
   }
 }
@@ -61,6 +92,10 @@ terraform {
 ```bash
 terraform init
 ```
+
+**Note**: The Service Account used by CI/CD must have access to:
+- The state bucket project (to read/write state)
+- Each environment project (to create/modify resources)
 
 ### 2. Initialize Workspaces
 
@@ -90,20 +125,27 @@ terraform workspace select prod
 
 ### 3. Configure Environment Variables
 
-Each environment has its own `tfvars` file. Update the appropriate file with your project details:
+Each environment has its own `tfvars` file with its **dedicated GCP project ID**. Update the appropriate file:
 
-- `dev.tfvars` - Development environment
-- `qa.tfvars` - QA environment
-- `preprod.tfvars` - Pre-production environment
-- `prod.tfvars` - Production environment
+- `dev.tfvars` - Development environment (uses `dev-project`)
+- `qa.tfvars` - QA environment (uses `qa-project`)
+- `preprod.tfvars` - Pre-production environment (uses `preprod-project`)
+- `prod.tfvars` - Production environment (uses `prod-project`)
+
+**Important**: Each `project_id` in the tfvars files must be a **different GCP project** dedicated to that environment.
 
 Example for dev:
 ```hcl
-project_id  = "your-project-dev"
+project_id  = "your-dev-project"  # Separate GCP project for dev resources
 region      = "us-central1"
 name_prefix = "codigo-dev"
 gke_num_nodes = 1
 ```
+
+**Before applying**, ensure:
+1. Each project has billing enabled
+2. Each project has the necessary APIs enabled (or use `terraform apply` which enables them automatically)
+3. Your Service Account has permissions in all projects
 
 ### 4. Apply Infrastructure
 

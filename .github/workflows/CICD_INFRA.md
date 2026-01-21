@@ -42,33 +42,86 @@ This directory contains GitHub Actions workflows for automated validation and de
 
 ## 🔐 Required Secrets
 
-### GCP_SA_KEY (Required)
+**IMPORTANT**: Since each environment uses a **separate GCP project**, you need **different Service Account keys** for each project.
 
-**Description**: GCP Service Account JSON key with permissions for:
-- Read/write to Terraform state bucket (GCS)
-- Create/modify GCP resources (GKE, VPC, IAM, etc.)
+### Required Secrets
 
-**How to obtain**:
+You need to configure **5 separate secrets** in GitHub:
+
+1. **`GCP_SA_KEY_STATE`**: Service Account key for the Terraform state project
+2. **`GCP_SA_KEY_DEV`**: Service Account key for the dev environment project
+3. **`GCP_SA_KEY_QA`**: Service Account key for the qa environment project
+4. **`GCP_SA_KEY_PREPROD`**: Service Account key for the preprod environment project
+5. **`GCP_SA_KEY_PROD`**: Service Account key for the prod environment project
+
+### Project Structure
+
+- **State Project**: Dedicated project for Terraform state bucket
+- **Dev Project**: Separate project for dev environment resources
+- **QA Project**: Separate project for qa environment resources
+- **Preprod Project**: Separate project for preprod environment resources
+- **Prod Project**: Separate project for prod environment resources
+
+### How to Create Service Accounts
+
+#### 1. State Project Service Account
+
 ```bash
-# Create Service Account
-gcloud iam service-accounts create terraform-ci \
-  --display-name="Terraform CI/CD"
+# Create Service Account in the state project
+gcloud config set project terraform-state-project
+gcloud iam service-accounts create terraform-state-sa \
+  --display-name="Terraform State Service Account"
 
-# Assign required roles
-gcloud projects add-iam-policy-binding PROJECT_ID \
-  --member="serviceAccount:terraform-ci@PROJECT_ID.iam.gserviceaccount.com" \
-  --role="roles/editor"
+# Grant access to state bucket
+gcloud projects add-iam-policy-binding terraform-state-project \
+  --member="serviceAccount:terraform-state-sa@terraform-state-project.iam.gserviceaccount.com" \
+  --role="roles/storage.objectAdmin"
 
 # Create and download key
-gcloud iam service-accounts keys create terraform-ci-key.json \
-  --iam-account=terraform-ci@PROJECT_ID.iam.gserviceaccount.com
+gcloud iam service-accounts keys create terraform-state-key.json \
+  --iam-account=terraform-state-sa@terraform-state-project.iam.gserviceaccount.com
 ```
 
-**Configure in GitHub**:
+#### 2. Environment Project Service Accounts
+
+For each environment project (dev, qa, preprod, prod):
+
+```bash
+# Set the environment project
+ENV=dev  # or qa, preprod, prod
+PROJECT_ID=your-${ENV}-project
+
+gcloud config set project $PROJECT_ID
+
+# Create Service Account
+gcloud iam service-accounts create terraform-${ENV}-sa \
+  --display-name="Terraform ${ENV} Service Account"
+
+# Grant editor role (or specific roles as needed)
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:terraform-${ENV}-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/editor"
+
+# Grant service account user role for GKE
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:terraform-${ENV}-sa@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountUser"
+
+# Create and download key
+gcloud iam service-accounts keys create terraform-${ENV}-key.json \
+  --iam-account=terraform-${ENV}-sa@${PROJECT_ID}.iam.gserviceaccount.com
+```
+
+**Note**: The state project Service Account also needs read access to the state bucket. The environment Service Accounts only need access to their respective projects.
+
+### Configure Secrets in GitHub
+
+For each Service Account key created:
+
 1. Go to Settings → Secrets and variables → Actions
 2. Click "New repository secret"
-3. Name: `GCP_SA_KEY`
-4. Value: Complete content of the JSON file (copy and paste)
+3. Name: `GCP_SA_KEY_STATE`, `GCP_SA_KEY_DEV`, `GCP_SA_KEY_QA`, `GCP_SA_KEY_PREPROD`, or `GCP_SA_KEY_PROD`
+4. Value: Complete content of the corresponding JSON key file (copy and paste)
 
 ## 🌍 Environments
 
@@ -181,31 +234,40 @@ terraform-apply.yml triggers
 
 ### Configured Workspaces
 
-- `dev`: Development (1 node)
-- `qa`: QA/Testing (2 nodes)
-- `preprod`: Pre-production (3 nodes)
-- `prod`: Production (4 nodes)
+- `dev`: Development (1 node) - Deploys to `dev-project`
+- `qa`: QA/Testing (2 nodes) - Deploys to `qa-project`
+- `preprod`: Pre-production (3 nodes) - Deploys to `preprod-project`
+- `prod`: Production (4 nodes) - Deploys to `prod-project`
 
 ### tfvars Files
 
-Each workspace has its variables file:
-- `dev.tfvars`
-- `qa.tfvars`
-- `preprod.tfvars`
-- `prod.tfvars`
+Each workspace has its variables file with its dedicated GCP project:
+- `dev.tfvars` - Contains `project_id` for dev-project
+- `qa.tfvars` - Contains `project_id` for qa-project
+- `preprod.tfvars` - Contains `project_id` for preprod-project
+- `prod.tfvars` - Contains `project_id` for prod-project
 
-**Important**: Workspaces must exist beforehand in the Terraform backend. They are not created automatically.
+**Important**: 
+- Workspaces must exist beforehand in the Terraform backend. They are not created automatically.
+- Each environment uses a **separate GCP project** for its resources
+- The Terraform state is stored in a **dedicated state project** (separate from environment projects)
 
 ## 🚨 Troubleshooting
 
 ### Workflow fails at "Authenticate to Google Cloud"
 
-**Cause**: The `GCP_SA_KEY` secret is not configured or is invalid.
+**Cause**: One or more of the required secrets is not configured or is invalid.
 
 **Solution**:
-1. Verify the secret exists in Settings → Secrets
-2. Verify the JSON is valid
-3. Verify the Service Account has the necessary permissions
+1. Verify all 5 secrets exist in Settings → Secrets:
+   - `GCP_SA_KEY_STATE`
+   - `GCP_SA_KEY_DEV`
+   - `GCP_SA_KEY_QA`
+   - `GCP_SA_KEY_PREPROD`
+   - `GCP_SA_KEY_PROD`
+2. Verify each JSON is valid
+3. Verify each Service Account has the necessary permissions in its respective project
+4. Check the workflow logs to see which specific secret/environment failed
 
 ### Plan fails with "Workspace does not exist"
 
@@ -240,18 +302,42 @@ terraform workspace new dev  # or qa, preprod, prod
 
 ### Best Practices
 
-1. **Credential rotation**: Rotate `GCP_SA_KEY` periodically
-2. **Least privilege principle**: Assign only necessary roles to the Service Account
-3. **Plan review**: Always review plans before approving
-4. **Protected environments**: Configure more reviewers for prod than for dev
-5. **Audit**: Regularly review deployment logs
+1. **Credential rotation**: Rotate all Service Account keys periodically (especially prod)
+2. **Least privilege principle**: Assign only necessary roles to each Service Account
+3. **Separate credentials**: Use different Service Accounts for each environment for better isolation
+4. **Plan review**: Always review plans before approving
+5. **Protected environments**: Configure more reviewers for prod than for dev
+6. **Audit**: Regularly review deployment logs and access patterns
+7. **State project security**: Limit access to the state project Service Account
 
 ### Minimum Service Account Permissions
 
-The Service Account needs these roles:
-- `roles/storage.objectAdmin` - To access the state bucket
-- `roles/editor` or specific roles - To create/modify resources
+Each Service Account needs different permissions:
+
+**State Project Service Account** (`GCP_SA_KEY_STATE`):
+- `roles/storage.objectAdmin` - To read/write the state bucket in the state project
+
+**Dev Project Service Account** (`GCP_SA_KEY_DEV`):
+- `roles/editor` or specific roles - To create/modify resources in dev-project
 - `roles/iam.serviceAccountUser` - To use service accounts in GKE
+- `roles/serviceusage.serviceUsageConsumer` - To enable APIs
+
+**QA Project Service Account** (`GCP_SA_KEY_QA`):
+- `roles/editor` or specific roles - To create/modify resources in qa-project
+- `roles/iam.serviceAccountUser` - To use service accounts in GKE
+- `roles/serviceusage.serviceUsageConsumer` - To enable APIs
+
+**Preprod Project Service Account** (`GCP_SA_KEY_PREPROD`):
+- `roles/editor` or specific roles - To create/modify resources in preprod-project
+- `roles/iam.serviceAccountUser` - To use service accounts in GKE
+- `roles/serviceusage.serviceUsageConsumer` - To enable APIs
+
+**Prod Project Service Account** (`GCP_SA_KEY_PROD`):
+- `roles/editor` or specific roles - To create/modify resources in prod-project
+- `roles/iam.serviceAccountUser` - To use service accounts in GKE
+- `roles/serviceusage.serviceUsageConsumer` - To enable APIs
+
+**Note**: Each Service Account only needs permissions in its own project. This provides better security isolation between environments.
 
 ## 📊 Monitoring
 
