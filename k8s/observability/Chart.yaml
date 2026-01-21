@@ -1,0 +1,17 @@
+apiVersion: v2
+name: codigo-observability
+version: 0.1.0
+type: application
+dependencies:
+  - name: kube-prometheus-stack
+    version: "61.7.0"
+    repository: "https://prometheus-community.github.io/helm-charts"
+  - name: loki
+    version: "6.16.0"
+    repository: "https://grafana.github.io/helm-charts"
+  - name: tempo
+    version: "1.10.0"
+    repository: "https://grafana.github.io/helm-charts"
+  - name: opentelemetry-collector
+    version: "0.109.0"
+    repository: "https://open-telemetry.github.io/opentelemetry-helm-charts"

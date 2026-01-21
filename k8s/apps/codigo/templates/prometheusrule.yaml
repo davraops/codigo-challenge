@@ -1,0 +1,21 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: codigo-alerts
+  namespace: observability
+spec:
+  groups:
+    - name: codigo.rules
+      rules:
+        - alert: CodigoApiHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{service="codigo-api",code=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{service="codigo-api"}[5m]))
+            > 0.02
+          for: 10m
+          labels:
+            severity: page
+          annotations:
+            summary: "High API 5xx rate"
+            description: "API 5xx rate > 2% for 10m"

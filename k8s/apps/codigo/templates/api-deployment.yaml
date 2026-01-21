@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codigo-api
+  namespace: codigo
+spec:
+  replicas: {{ .Values.replicaCount.api }}
+  selector:
+    matchLabels:
+      app: codigo-api
+  template:
+    metadata:
+      labels:
+        app: codigo-api
+    spec:
+      containers:
+        - name: api
+          image: {{ .Values.images.api }}
+          ports:
+            - containerPort: {{ .Values.service.apiPort }}
+          envFrom:
+            - configMapRef:
+                name: codigo-config
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.otel.collectorEndpoint | quote }}
+            - name: SERVICE_NAME
+              value: "codigo-api"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.service.apiPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.apiPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

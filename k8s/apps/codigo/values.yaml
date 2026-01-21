@@ -1,0 +1,24 @@
+namespace: codigo
+
+images:
+  api: ghcr.io/your-org/codigo-api:latest
+  worker: ghcr.io/your-org/codigo-worker:latest
+
+replicaCount:
+  api: 2
+  worker: 1
+
+service:
+  apiPort: 8080
+
+postgres:
+  image: postgres:16
+  db: codigo
+  user: codigo
+  password: codigo
+
+nats:
+  image: nats:2.10
+
+otel:
+  collectorEndpoint: "http://otel-collector.observability:4318"

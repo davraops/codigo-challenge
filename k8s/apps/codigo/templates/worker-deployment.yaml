@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codigo-worker
+  namespace: codigo
+spec:
+  replicas: {{ .Values.replicaCount.worker }}
+  selector:
+    matchLabels:
+      app: codigo-worker
+  template:
+    metadata:
+      labels:
+        app: codigo-worker
+    spec:
+      containers:
+        - name: worker
+          image: {{ .Values.images.worker }}
+          envFrom:
+            - configMapRef:
+                name: codigo-config
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.otel.collectorEndpoint | quote }}
+            - name: SERVICE_NAME
+              value: "codigo-worker"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

@@ -1,0 +1,68 @@
+kube-prometheus-stack:
+  namespaceOverride: observability
+  grafana:
+    adminPassword: "admin"
+    service:
+      type: ClusterIP
+    additionalDataSources:
+      - name: Loki
+        type: loki
+        url: http://loki.observability:3100
+        access: proxy
+      - name: Tempo
+        type: tempo
+        url: http://tempo.observability:3100
+        access: proxy
+    dashboardProviders:
+      dashboardproviders.yaml:
+        apiVersion: 1
+        providers:
+          - name: codigo
+            orgId: 1
+            folder: Codigo
+            type: file
+            disableDeletion: false
+            editable: true
+            options:
+              path: /var/lib/grafana/dashboards/codigo
+    extraVolumeMounts:
+      - name: codigo-dashboards
+        mountPath: /var/lib/grafana/dashboards/codigo
+    extraVolumes:
+      - name: codigo-dashboards
+        configMap:
+          name: codigo-dashboards
+  prometheus:
+    prometheusSpec:
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+
+loki:
+  namespaceOverride: observability
+  deploymentMode: SingleBinary
+  singleBinary:
+    replicas: 1
+
+tempo:
+  namespaceOverride: observability
+  tempo:
+    retention: 24h
+
+opentelemetry-collector:
+  namespaceOverride: observability
+  mode: deployment
+  config:
+    receivers:
+      otlp:
+        protocols:
+          http:
+          grpc:
+    exporters:
+      logging:
+      otlphttp/tempo:
+        endpoint: http://tempo.observability:4318
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          exporters: [otlphttp/tempo, logging]

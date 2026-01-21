@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codigo-config
+  namespace: codigo
+data:
+  POSTGRES_HOST: "postgres.codigo.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "codigo"
+  POSTGRES_USER: "codigo"
+  NATS_URL: "nats://nats.codigo.svc.cluster.local:4222"
