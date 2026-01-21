@@ -1,0 +1,203 @@
+name: Terraform PR Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'infra/terraform/**'
+
+env:
+  TF_VERSION: '1.5.0'
+
+jobs:
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: infra/terraform
+        continue-on-error: true
+
+      - name: Initialize and Validate Terraform
+        run: |
+          cd infra/terraform
+          
+          # Initialize Terraform with the real backend (without credentials for validation)
+          echo "Initializing Terraform..."
+          terraform init -backend=false || {
+            echo "❌ Failed to initialize Terraform"
+            exit 1
+          }
+          
+          # Validate once (validation is workspace-agnostic)
+          echo "Validating Terraform configuration..."
+          if terraform validate; then
+            echo "✅ Validation passed"
+          else
+            echo "❌ Validation failed"
+            exit 1
+          fi
+
+  terraform-plan:
+    name: Terraform Plan - ${{ matrix.workspace }}
+    runs-on: ubuntu-latest
+    needs: terraform-validate
+    strategy:
+      matrix:
+        workspace: [dev, qa, preprod, prod]
+      fail-fast: false
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Plan workspace
+        id: plan
+        run: |
+          cd infra/terraform
+          
+          # Check if tfvars file exists
+          if [ ! -f "${{ matrix.workspace }}.tfvars" ]; then
+            echo "❌ Error: ${{ matrix.workspace }}.tfvars not found"
+            exit 1
+          fi
+          
+          # Initialize Terraform
+          echo "Initializing Terraform..."
+          terraform init || {
+            echo "❌ Failed to initialize Terraform"
+            exit 1
+          }
+          
+          # Select existing workspace (workspace should already exist)
+          echo "Selecting workspace: ${{ matrix.workspace }}..."
+          if ! terraform workspace select ${{ matrix.workspace }}; then
+            echo "❌ Workspace ${{ matrix.workspace }} does not exist. Please create it first."
+            exit 1
+          fi
+          
+          # Plan
+          echo "Running plan for ${{ matrix.workspace }}..."
+          if terraform plan \
+            -var-file=${{ matrix.workspace }}.tfvars \
+            -no-color \
+            -out=tfplan-${{ matrix.workspace }}.out 2>&1 | tee plan-${{ matrix.workspace }}.log; then
+            echo "✅ Plan completed for ${{ matrix.workspace }}"
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Plan failed for ${{ matrix.workspace }}"
+            echo "status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+  comment-pr:
+    name: Comment PR Results
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    if: always() && github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Comment PR with Results
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const workspaces = ['dev', 'qa', 'preprod', 'prod'];
+            const jobs = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            
+            let comment = '## 🔍 Terraform PR Validation Results\n\n';
+            comment += '### ✅ Validation: Passed\n\n';
+            comment += '### Plan Results by Workspace\n\n';
+            
+            let allPassed = true;
+            
+            for (const ws of workspaces) {
+              const job = jobs.data.jobs.find(j => j.name.includes(ws));
+              if (job) {
+                if (job.conclusion === 'success') {
+                  comment += `✅ **${ws}**: Plan successful\n`;
+                } else {
+                  comment += `❌ **${ws}**: Plan failed\n`;
+                  allPassed = false;
+                }
+              } else {
+                comment += `⚠️ **${ws}**: Job not found\n`;
+                allPassed = false;
+              }
+            }
+            
+            if (!allPassed) {
+              comment += '\n### ❌ Some plans failed\n';
+            } else {
+              comment += '\n### ✅ All plans passed\n';
+            }
+            
+            comment += '\n---\n';
+            comment += '*This comment is automatically generated by the Terraform PR workflow*\n';
+            comment += '*To see detailed logs, check the workflow run*';
+            
+            // Find existing comment
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.data.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('Terraform PR Validation Results')
+            );
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            }
+

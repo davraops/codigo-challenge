@@ -1,0 +1,399 @@
+name: Terraform Apply
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'infra/terraform/**'
+
+env:
+  TF_VERSION: '1.5.0'
+
+jobs:
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: infra/terraform
+        continue-on-error: true
+
+      - name: Initialize and Validate Terraform
+        run: |
+          cd infra/terraform
+          
+          # Initialize Terraform without backend for validation
+          echo "Initializing Terraform..."
+          terraform init -backend=false || {
+            echo "❌ Failed to initialize Terraform"
+            exit 1
+          }
+          
+          # Validate once (validation is workspace-agnostic)
+          echo "Validating Terraform configuration..."
+          if terraform validate; then
+            echo "✅ Validation passed"
+          else
+            echo "❌ Validation failed"
+            exit 1
+          fi
+
+  terraform-plan:
+    name: Terraform Plan - ${{ matrix.workspace }}
+    runs-on: ubuntu-latest
+    needs: terraform-validate
+    strategy:
+      matrix:
+        workspace: [dev, qa, preprod, prod]
+      fail-fast: false
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Plan workspace
+        id: plan
+        run: |
+          cd infra/terraform
+          
+          # Check if tfvars file exists
+          if [ ! -f "${{ matrix.workspace }}.tfvars" ]; then
+            echo "❌ Error: ${{ matrix.workspace }}.tfvars not found"
+            exit 1
+          fi
+          
+          # Initialize Terraform
+          echo "Initializing Terraform..."
+          terraform init || {
+            echo "❌ Failed to initialize Terraform"
+            exit 1
+          }
+          
+          # Select existing workspace (workspace should already exist)
+          echo "Selecting workspace: ${{ matrix.workspace }}..."
+          if ! terraform workspace select ${{ matrix.workspace }}; then
+            echo "❌ Workspace ${{ matrix.workspace }} does not exist. Please create it first."
+            exit 1
+          fi
+          
+          # Plan
+          echo "Running plan for ${{ matrix.workspace }}..."
+          if terraform plan \
+            -var-file=${{ matrix.workspace }}.tfvars \
+            -no-color \
+            -out=tfplan-${{ matrix.workspace }}.out; then
+            echo "✅ Plan completed for ${{ matrix.workspace }}"
+            echo "plan_file=tfplan-${{ matrix.workspace }}.out" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Plan failed for ${{ matrix.workspace }}"
+            exit 1
+          fi
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ matrix.workspace }}
+          path: infra/terraform/tfplan-${{ matrix.workspace }}.out
+          retention-days: 1
+
+  terraform-apply-dev:
+    name: Terraform Apply - dev
+    runs-on: ubuntu-latest
+    environment: dev
+    needs: [terraform-validate, terraform-plan]
+    if: |
+      always() &&
+      needs.terraform-validate.result == 'success' &&
+      (needs.terraform-plan.result == 'success' || needs.terraform-plan.result == 'failure')
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download plan artifact
+        id: download-plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-dev
+          path: infra/terraform/
+        continue-on-error: true
+
+      - name: Check if plan exists
+        if: steps.download-plan.outcome != 'success'
+        run: |
+          echo "❌ Plan artifact for dev not found. Plan may have failed."
+          exit 1
+
+      - name: Apply workspace
+        run: |
+          cd infra/terraform
+          
+          # Initialize Terraform
+          echo "Initializing Terraform..."
+          terraform init || {
+            echo "❌ Failed to initialize Terraform"
+            exit 1
+          }
+          
+          # Select workspace
+          echo "Selecting workspace: dev..."
+          terraform workspace select dev
+          
+          # Apply using the plan file
+          echo "Applying changes for dev..."
+          terraform apply -auto-approve tfplan-dev.out || {
+            echo "❌ Apply failed for dev"
+            exit 1
+          }
+          
+          echo "✅ Apply completed for dev"
+
+  terraform-apply-qa:
+    name: Terraform Apply - qa
+    runs-on: ubuntu-latest
+    environment: qa
+    needs: [terraform-validate, terraform-plan]
+    if: |
+      always() &&
+      needs.terraform-validate.result == 'success' &&
+      (needs.terraform-plan.result == 'success' || needs.terraform-plan.result == 'failure')
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download plan artifact
+        id: download-plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-qa
+          path: infra/terraform/
+        continue-on-error: true
+
+      - name: Check if plan exists
+        if: steps.download-plan.outcome != 'success'
+        run: |
+          echo "❌ Plan artifact for qa not found. Plan may have failed."
+          exit 1
+
+      - name: Apply workspace
+        run: |
+          cd infra/terraform
+          
+          # Initialize Terraform
+          echo "Initializing Terraform..."
+          terraform init || {
+            echo "❌ Failed to initialize Terraform"
+            exit 1
+          }
+          
+          # Select workspace
+          echo "Selecting workspace: qa..."
+          terraform workspace select qa
+          
+          # Apply using the plan file
+          echo "Applying changes for qa..."
+          terraform apply -auto-approve tfplan-qa.out || {
+            echo "❌ Apply failed for qa"
+            exit 1
+          }
+          
+          echo "✅ Apply completed for qa"
+
+  terraform-apply-preprod:
+    name: Terraform Apply - preprod
+    runs-on: ubuntu-latest
+    environment: preprod
+    needs: [terraform-validate, terraform-plan]
+    if: |
+      always() &&
+      needs.terraform-validate.result == 'success' &&
+      (needs.terraform-plan.result == 'success' || needs.terraform-plan.result == 'failure')
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download plan artifact
+        id: download-plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-preprod
+          path: infra/terraform/
+        continue-on-error: true
+
+      - name: Check if plan exists
+        if: steps.download-plan.outcome != 'success'
+        run: |
+          echo "❌ Plan artifact for preprod not found. Plan may have failed."
+          exit 1
+
+      - name: Apply workspace
+        run: |
+          cd infra/terraform
+          
+          # Initialize Terraform
+          echo "Initializing Terraform..."
+          terraform init || {
+            echo "❌ Failed to initialize Terraform"
+            exit 1
+          }
+          
+          # Select workspace
+          echo "Selecting workspace: preprod..."
+          terraform workspace select preprod
+          
+          # Apply using the plan file
+          echo "Applying changes for preprod..."
+          terraform apply -auto-approve tfplan-preprod.out || {
+            echo "❌ Apply failed for preprod"
+            exit 1
+          }
+          
+          echo "✅ Apply completed for preprod"
+
+  terraform-apply-prod:
+    name: Terraform Apply - prod
+    runs-on: ubuntu-latest
+    environment: prod
+    needs: [terraform-validate, terraform-plan]
+    if: |
+      always() &&
+      needs.terraform-validate.result == 'success' &&
+      (needs.terraform-plan.result == 'success' || needs.terraform-plan.result == 'failure')
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download plan artifact
+        id: download-plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-prod
+          path: infra/terraform/
+        continue-on-error: true
+
+      - name: Check if plan exists
+        if: steps.download-plan.outcome != 'success'
+        run: |
+          echo "❌ Plan artifact for prod not found. Plan may have failed."
+          exit 1
+
+      - name: Apply workspace
+        run: |
+          cd infra/terraform
+          
+          # Initialize Terraform
+          echo "Initializing Terraform..."
+          terraform init || {
+            echo "❌ Failed to initialize Terraform"
+            exit 1
+          }
+          
+          # Select workspace
+          echo "Selecting workspace: prod..."
+          terraform workspace select prod
+          
+          # Apply using the plan file
+          echo "Applying changes for prod..."
+          terraform apply -auto-approve tfplan-prod.out || {
+            echo "❌ Apply failed for prod"
+            exit 1
+          }
+          
+          echo "✅ Apply completed for prod"
+
