@@ -117,12 +117,30 @@ This means:
 
 - **Path**: `k8s/observability`
 - **Namespace**: `observability`
+- **Type**: Helm Chart with dependencies
 - **Components**:
-  - Prometheus (via kube-prometheus-stack)
-  - Grafana with Loki and Tempo data sources
-  - Loki for log aggregation
-  - Tempo for distributed tracing
-  - OpenTelemetry Collector for trace collection
+  - **Prometheus** (via kube-prometheus-stack)
+    - Scrapes metrics from API and Worker via ServiceMonitors
+    - 30-day retention period
+    - Persistent storage (50Gi)
+  - **Grafana**
+    - Pre-configured datasources: Prometheus, Loki, Tempo
+    - Pre-built dashboards: Golden Signals, Dependencies
+    - Persistent storage (10Gi)
+    - Admin credentials: admin/admin (change in production)
+  - **Loki** (log aggregation)
+    - Single binary mode
+    - Promtail for log collection from all pods
+    - 7-day retention period
+    - Persistent storage (20Gi)
+  - **Tempo** (distributed tracing)
+    - OTLP receivers (HTTP and gRPC)
+    - 48-hour retention period
+    - Local storage backend
+  - **OpenTelemetry Collector**
+    - Receives traces from applications
+    - Forwards to Tempo
+    - Batch processing enabled
 
 ## Troubleshooting
 

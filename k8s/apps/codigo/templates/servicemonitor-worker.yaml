@@ -1,0 +1,17 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: codigo-worker
+  namespace: codigo
+  labels:
+    app: codigo-worker
+spec:
+  selector:
+    matchLabels:
+      app: codigo-worker
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+

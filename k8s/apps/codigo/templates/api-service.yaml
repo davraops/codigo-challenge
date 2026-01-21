@@ -9,5 +9,9 @@ spec:
   selector:
     app: codigo-api
   ports:
-    - port: 80
+    - name: http
+      port: 80
+      targetPort: {{ .Values.service.apiPort }}
+    - name: metrics
+      port: 8080
       targetPort: {{ .Values.service.apiPort }}
