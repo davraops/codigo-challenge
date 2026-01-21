@@ -1,0 +1,9 @@
+# Binaries
+slo-reporter
+slo-reporter.exe
+
+# Go
+*.test
+*.out
+vendor/
+
