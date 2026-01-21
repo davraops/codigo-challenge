@@ -1,0 +1,73 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: codigo-slo-alerts
+  namespace: codigo
+  labels:
+    app: codigo
+    prometheus: kube-prometheus-stack
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: codigo_slo_alerts
+      interval: 1m
+      rules:
+        - alert: HighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{service=~"codigo-api", code=~"5.."}[5m])) 
+              / 
+              sum(rate(http_requests_total{service=~"codigo-api"}[5m]))
+            ) > 0.01
+          for: 5m
+          labels:
+            severity: warning
+            slo: availability
+          annotations:
+            summary: "High error rate detected - Availability SLO at risk"
+            description: "Error rate is {{ $value | humanizePercentage }}. SLO target: 99.9%."
+
+        - alert: HighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(http_request_duration_seconds_bucket{service=~"codigo-api"}[5m]))
+              by (le, service)
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+            slo: latency
+          annotations:
+            summary: "High latency detected - Latency SLO at risk"
+            description: "p95 latency is {{ $value | humanizeDuration }}. SLO target: ≤ 500ms."
+
+        - alert: CriticalErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{service=~"codigo-api", code=~"5.."}[5m])) 
+              / 
+              sum(rate(http_requests_total{service=~"codigo-api"}[5m]))
+            ) > 0.05
+          for: 2m
+          labels:
+            severity: critical
+            slo: availability
+          annotations:
+            summary: "Critical error rate - Availability SLO breached"
+            description: "Error rate is {{ $value | humanizePercentage }}. SLO target: 99.9%."
+
+        - alert: JobProcessingFailure
+          expr: |
+            (
+              sum(rate(jobs_processed_total{service="codigo-worker", result="error"}[5m])) 
+              / 
+              sum(rate(jobs_processed_total{service="codigo-worker"}[5m]))
+            ) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+            component: worker
+          annotations:
+            summary: "High job processing failure rate"
+            description: "Job failure rate is {{ $value | humanizePercentage }}."
+
