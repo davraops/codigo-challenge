@@ -17,10 +17,13 @@ terraform apply
 2) Install ArgoCD into the cluster:
 See: `argocd/bootstrap/install-argocd.md`
 
-3) Bootstrap app-of-apps:
+3) Bootstrap GitOps (App-of-Apps):
 ```bash
+# Update REPO_URL in root-app.yaml first, then:
 kubectl apply -n argocd -f argocd/bootstrap/root-app.yaml
 ```
+
+For detailed ArgoCD setup instructions, see: `argocd/README.md`
 
 4) Verify:
 - ArgoCD sync: all apps Healthy

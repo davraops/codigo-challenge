@@ -3,16 +3,23 @@ kind: Application
 metadata:
   name: codigo-root
   namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
-    repoURL: REPO_URL
+    repoURL: REPO_URL  # Replace with your repository URL
     targetRevision: HEAD
     path: argocd/apps/app-of-apps
+    helm:
+      valueFiles:
+        - values.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: argocd
   syncPolicy:
     automated:
-      prune: true
-      selfHeal: true
+      prune: true      # Automatically remove resources deleted from Git
+      selfHeal: true   # Automatically revert manual changes
+    syncOptions:
+      - CreateNamespace=true
