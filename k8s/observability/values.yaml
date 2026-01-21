@@ -1,18 +1,38 @@
 kube-prometheus-stack:
   namespaceOverride: observability
+  
+  # Grafana Configuration
   grafana:
     adminPassword: "admin"
     service:
       type: ClusterIP
+      port: 80
+    
+    # Additional datasources for Loki and Tempo
     additionalDataSources:
       - name: Loki
         type: loki
         url: http://loki.observability:3100
         access: proxy
+        jsonData:
+          maxLines: 1000
       - name: Tempo
         type: tempo
         url: http://tempo.observability:3100
         access: proxy
+        jsonData:
+          httpMethod: GET
+          tracesToLogs:
+            datasourceUid: loki
+            tags: ['job', 'instance', 'pod', 'namespace']
+            mappedTags: [{ key: 'service.name', value: 'service' }]
+            mapTagNamesEnabled: false
+            spanStartTimeShift: '1h'
+            spanEndTimeShift: '1h'
+            filterByTraceID: false
+            filterBySpanID: false
+    
+    # Dashboard provisioning
     dashboardProviders:
       dashboardproviders.yaml:
         apiVersion: 1
@@ -25,44 +45,258 @@ kube-prometheus-stack:
             editable: true
             options:
               path: /var/lib/grafana/dashboards/codigo
+    
+    # Mount dashboards from ConfigMap
     extraVolumeMounts:
       - name: codigo-dashboards
         mountPath: /var/lib/grafana/dashboards/codigo
+        readOnly: true
+    
     extraVolumes:
       - name: codigo-dashboards
         configMap:
           name: codigo-dashboards
+    
+    # Persistence for Grafana data
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClassName: standard
+  
+  # Prometheus Configuration
   prometheus:
     prometheusSpec:
+      # Enable scraping of ServiceMonitors and PodMonitors from all namespaces
       serviceMonitorSelectorNilUsesHelmValues: false
       podMonitorSelectorNilUsesHelmValues: false
+      
+      # Retention period for metrics
+      retention: 30d
+      
+      # Resource limits
+      resources:
+        requests:
+          memory: 2Gi
+          cpu: 1000m
+        limits:
+          memory: 4Gi
+          cpu: 2000m
+      
+      # Storage
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: standard
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 50Gi
+      
+      # Additional scrape configs if needed
+      additionalScrapeConfigs: []
+  
+  # Alertmanager Configuration (optional, can be enabled later)
+  alertmanager:
+    enabled: false
 
 loki:
   namespaceOverride: observability
+  
+  # Single binary mode for simplicity
   deploymentMode: SingleBinary
   singleBinary:
     replicas: 1
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClassName: standard
+    
+    # Resource limits
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 500m
+      limits:
+        memory: 1Gi
+        cpu: 1000m
+  
+  # Configuration for log retention
+  config:
+    limits_config:
+      retention_period: 168h  # 7 days
+      ingestion_rate_mb: 10
+      ingestion_burst_size_mb: 20
+    
+    schema_config:
+      configs:
+        - from: "2024-01-01"
+          store: boltdb-shipper
+          object_store: filesystem
+          schema: v11
+          index:
+            prefix: index_
+            period: 24h
+  
+  # Promtail for log collection
+  promtail:
+    enabled: true
+    config:
+      clients:
+        - url: http://loki:3100/loki/api/v1/push
+      
+      scrape_configs:
+        - job_name: kubernetes-pods
+          kubernetes_sd_configs:
+            - role: pod
+          relabel_configs:
+            - source_labels:
+                - __meta_kubernetes_pod_controller_name
+              regex: ([0-9a-z-.]+?)(-[0-9a-f]{8,10})?
+              action: replace
+              target_label: __tmp_controller_name
+            - source_labels:
+                - __meta_kubernetes_pod_label_app_kubernetes_io_name
+                - __meta_kubernetes_pod_label_app
+                - __tmp_controller_name
+                - __meta_kubernetes_pod_name
+              regex: ^;*([^;]+)(;.*)?$
+              action: replace
+              target_label: app
+            - source_labels:
+                - __meta_kubernetes_pod_label_app_kubernetes_io_instance
+                - __meta_kubernetes_pod_label_release
+              regex: ^;*([^;]+)(;.*)?$
+              action: replace
+              target_label: instance
+            - source_labels:
+                - __meta_kubernetes_pod_label_app_kubernetes_io_component
+                - __meta_kubernetes_pod_label_component
+              regex: ^;*([^;]+)(;.*)?$
+              action: replace
+              target_label: component
+            - action: replace
+              replacement: $1
+              separator: /
+              source_labels:
+                - __meta_kubernetes_namespace
+                - app
+              target_label: job
+            - action: replace
+              source_labels:
+                - __meta_kubernetes_namespace
+              target_label: namespace
+            - action: replace
+              source_labels:
+                - __meta_kubernetes_pod_name
+              target_label: pod
+            - action: replace
+              source_labels:
+                - __meta_kubernetes_pod_container_name
+              target_label: container
+            - action: replace
+              replacement: /var/log/pods/*$1/*.log
+              separator: /
+              source_labels:
+                - __meta_kubernetes_pod_uid
+                - __meta_kubernetes_pod_container_name
+              target_label: __path__
+            - action: replace
+              regex: true/(.*)
+              replacement: /var/log/pods/$1
+              separator: /
+              source_labels:
+                - __meta_kubernetes_pod_annotationpresent_kubernetes_io_config_hash
+                - __meta_kubernetes_pod_annotation_kubernetes_io_config_hash
+                - __meta_kubernetes_pod_container_name
+              target_label: __path__
 
 tempo:
   namespaceOverride: observability
+  
   tempo:
-    retention: 24h
+    # Retention period for traces
+    retention: 48h
+    
+    # Resource limits
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 500m
+      limits:
+        memory: 1Gi
+        cpu: 1000m
+    
+    # Storage configuration
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+        pool:
+          max_workers: 100
+          queue_depth: 10000
+    
+    # OTLP receiver configuration
+    otlp:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  
+  # Service configuration
+  service:
+    type: ClusterIP
+    ports:
+      otlp:
+        grpc:
+          port: 4317
+        http:
+          port: 4318
+      tempo:
+        port: 3100
 
 opentelemetry-collector:
   namespaceOverride: observability
+  
   mode: deployment
+  
+  # Resource limits
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 200m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+  
+  # OpenTelemetry Collector configuration
   config:
     receivers:
       otlp:
         protocols:
           http:
+            endpoint: 0.0.0.0:4318
           grpc:
+            endpoint: 0.0.0.0:4317
+    
+    processors:
+      batch:
+        timeout: 1s
+        send_batch_size: 1024
+      memory_limiter:
+        limit_mib: 256
+    
     exporters:
       logging:
+        loglevel: info
       otlphttp/tempo:
         endpoint: http://tempo.observability:4318
+        tls:
+          insecure: true
+    
     service:
       pipelines:
         traces:
           receivers: [otlp]
+          processors: [memory_limiter, batch]
           exporters: [otlphttp/tempo, logging]

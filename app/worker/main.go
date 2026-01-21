@@ -3,16 +3,20 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"net/http"
 	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
 )
 
 var (
@@ -24,52 +28,164 @@ var (
 	jobLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "job_processing_duration_seconds",
 		Help:    "Job processing duration",
-		Buckets: prometheus.DefBuckets,
+		Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 	}, []string{"service"})
+
+	dbConnections = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "db_connections_active",
+		Help: "Active database connections",
+	}, []string{"service"})
+
+	natsMessagesReceived = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "nats_messages_received_total",
+		Help: "Total NATS messages received",
+	}, []string{"service", "subject"})
 )
 
 func main() {
 	serviceName := getenv("SERVICE_NAME", "codigo-worker")
-	prometheus.MustRegister(jobsProcessed, jobLatency)
+
+	// Initialize structured logger
+	logger, err := zap.NewProduction()
+	if err != nil {
+		panic(fmt.Sprintf("failed to initialize logger: %v", err))
+	}
+	defer logger.Sync()
+
+	// Register Prometheus metrics
+	prometheus.MustRegister(jobsProcessed, jobLatency, dbConnections, natsMessagesReceived)
 
 	ctx := context.Background()
+
+	// Initialize OpenTelemetry
 	shutdown := initOTel(ctx, serviceName)
 	defer shutdown()
 
+	// Initialize database
 	db := mustDB(ctx)
 	defer db.Close()
 
+	// Initialize NATS
 	nc := mustNATS()
 	defer nc.Close()
 
-	_, err := nc.Subscribe("jobs", func(m *nats.Msg) {
-		start := time.Now()
-		jobID := string(m.Data)
-
-		tr := otel.Tracer("codigo-worker")
-		ctx, span := tr.Start(context.Background(), "processJob")
-		span.SetAttributes(attribute.String("job.id", jobID))
-		defer span.End()
-
-		// simulate work
-		time.Sleep(150 * time.Millisecond)
-
-		_, err := db.Exec(ctx, `UPDATE jobs SET status='done' WHERE id=$1`, jobID)
-		if err != nil {
-			log.Printf("db update error: %v", err)
-			jobsProcessed.WithLabelValues(serviceName, "error").Inc()
-			return
+	// Start metrics HTTP server
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		http.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			w.Write([]byte("ok"))
+		}))
+		logger.Info("metrics server starting", zap.String("address", ":8080"))
+		if err := http.ListenAndServe(":8080", nil); err != nil {
+			logger.Fatal("metrics server failed", zap.Error(err))
 		}
+	}()
 
-		jobsProcessed.WithLabelValues(serviceName, "ok").Inc()
-		jobLatency.WithLabelValues(serviceName).Observe(time.Since(start).Seconds())
+	// Start background goroutine to update DB connection metrics
+	go updateDBMetrics(db, serviceName)
+
+	// Subscribe to jobs
+	_, err = nc.Subscribe("jobs", func(m *nats.Msg) {
+		processJob(m, db, serviceName, logger)
 	})
 	if err != nil {
-		panic(err)
+		logger.Fatal("failed to subscribe to jobs", zap.Error(err))
 	}
 
-	log.Printf("worker running, subscribed to jobs")
+	logger.Info("worker running", zap.String("subject", "jobs"))
 	select {}
+}
+
+func processJob(m *nats.Msg, db *pgxpool.Pool, serviceName string, logger *zap.Logger) {
+	start := time.Now()
+	jobID := string(m.Data)
+
+	// Extract trace context from NATS headers
+	propagator := otel.GetTextMapPropagator()
+	ctx := propagator.Extract(context.Background(), natsHeaderCarrier(m.Header))
+
+	// Start span with extracted context
+	tr := otel.Tracer("codigo-worker")
+	ctx, span := tr.Start(ctx, "processJob")
+	defer span.End()
+
+	traceID := span.SpanContext().TraceID().String()
+	spanID := span.SpanContext().SpanID().String()
+
+	span.SetAttributes(
+		attribute.String("job.id", jobID),
+		attribute.String("nats.subject", m.Subject),
+	)
+
+	logger.Info("processing job",
+		zap.String("trace_id", traceID),
+		zap.String("span_id", spanID),
+		zap.String("job_id", jobID))
+
+	natsMessagesReceived.WithLabelValues(serviceName, m.Subject).Inc()
+
+	// Simulate work
+	time.Sleep(150 * time.Millisecond)
+
+	// Update job status
+	_, err := db.Exec(ctx, `UPDATE jobs SET status='done' WHERE id=$1`, jobID)
+	if err != nil {
+		logger.Error("database error - update job",
+			zap.String("trace_id", traceID),
+			zap.String("job_id", jobID),
+			zap.Error(err))
+		span.RecordError(err)
+		jobsProcessed.WithLabelValues(serviceName, "error").Inc()
+		return
+	}
+
+	duration := time.Since(start)
+	jobsProcessed.WithLabelValues(serviceName, "ok").Inc()
+	jobLatency.WithLabelValues(serviceName).Observe(duration.Seconds())
+
+	span.SetAttributes(
+		attribute.String("job.status", "done"),
+		attribute.Float64("job.duration_ms", float64(duration.Milliseconds())),
+	)
+
+	logger.Info("job processed successfully",
+		zap.String("trace_id", traceID),
+		zap.String("job_id", jobID),
+		zap.Duration("duration", duration))
+}
+
+func updateDBMetrics(db *pgxpool.Pool, serviceName string) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		stats := db.Stat()
+		dbConnections.WithLabelValues(serviceName).Set(float64(stats.AcquiredConns()))
+	}
+}
+
+// natsHeaderCarrier adapts NATS headers to OpenTelemetry propagation
+type natsHeaderCarrier nats.Header
+
+func (c natsHeaderCarrier) Get(key string) string {
+	vals := nats.Header(c).Values(key)
+	if len(vals) > 0 {
+		return vals[0]
+	}
+	return ""
+}
+
+func (c natsHeaderCarrier) Set(key, value string) {
+	nats.Header(c).Set(key, value)
+}
+
+func (c natsHeaderCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for k := range c {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func mustDB(ctx context.Context) *pgxpool.Pool {
