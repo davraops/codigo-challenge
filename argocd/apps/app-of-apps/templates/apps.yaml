@@ -34,6 +34,12 @@ spec:
     repoURL: {{ .Values.repoURL }}
     targetRevision: {{ .Values.targetRevision }}
     path: k8s/apps/codigo
+    # Helm configuration: ArgoCD will use Helm to render the chart from k8s/apps/codigo
+    # and use values.yaml for template values. This allows the CI/CD pipeline to update
+    # the image in values.yaml and ArgoCD will automatically detect and deploy the changes.
+    helm:
+      valueFiles:
+        - values.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: codigo

@@ -1,0 +1,89 @@
+name: App Worker Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+
+env:
+  GO_VERSION: ${{ vars.GO_VERSION || '1.22' }}
+  DOCKER_IMAGE_NAME: ${{ vars.DOCKER_IMAGE_NAME_WORKER || 'codigo-worker' }}
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: dedicated-runner
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            app/worker
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: SCA Scan - Dependency vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: 'app/worker'
+          format: 'sarif'
+          output: 'trivy-sca-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          scanners: 'vulnerability'
+
+      - name: Upload SCA results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-sca-results.sarif'
+
+      - name: SAST Scan - Static code analysis
+        uses: securego/gosec-action@master
+        with:
+          args: '-no-fail -fmt sarif -out gosec-results.sarif ./...'
+          working-directory: app/worker
+
+      - name: Upload SAST results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: app/worker/gosec-results.sarif
+
+      - name: Create Git Tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ github.event.inputs.version }}-worker" -m "Release ${{ github.event.inputs.version }} - Worker"
+          git push origin "${{ github.event.inputs.version }}-worker"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.version }}-worker
+          name: Release ${{ github.event.inputs.version }} - Worker
+          body: |
+            ## Release ${{ github.event.inputs.version }} - Worker
+
+            ### Security Scan Results
+            - **SCA Scan**: Dependency vulnerability scan completed
+            - **SAST Scan**: Static code analysis completed
+
+            See GitHub Security tab for detailed results.
+
+            ### Changes
+            See commit history for changes in this release.
+
+            **Commit**: `${{ github.sha }}`
+            **Author**: ${{ github.actor }}
+          draft: false
+          prerelease: false
+

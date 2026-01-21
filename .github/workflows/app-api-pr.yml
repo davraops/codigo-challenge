@@ -1,0 +1,286 @@
+name: App API PR
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'app/api/**'
+
+env:
+  GO_VERSION: ${{ vars.GO_VERSION || '1.22' }}
+  POSTGRES_HOST: ${{ vars.POSTGRES_HOST || 'localhost' }}
+  POSTGRES_PORT: ${{ vars.POSTGRES_PORT || '5432' }}
+  POSTGRES_USER: ${{ vars.POSTGRES_USER || 'test' }}
+  POSTGRES_DB: ${{ vars.POSTGRES_DB || 'test' }}
+  NATS_URL: ${{ vars.NATS_URL || 'nats://localhost:4222' }}
+  API_PORT: ${{ vars.API_PORT || '8080' }}
+  API_HEALTH_ENDPOINT: ${{ vars.API_HEALTH_ENDPOINT || '/healthz' }}
+  HEALTHCHECK_MAX_ATTEMPTS: ${{ vars.HEALTHCHECK_MAX_ATTEMPTS || '30' }}
+  HEALTHCHECK_SLEEP_SECONDS: ${{ vars.HEALTHCHECK_SLEEP_SECONDS || '2' }}
+  DOCKER_IMAGE_NAME: ${{ vars.DOCKER_IMAGE_NAME || 'codigo-api' }}
+  CONTAINER_NAME: ${{ vars.CONTAINER_NAME || 'api-test' }}
+  GOLANGCI_LINT_TIMEOUT: ${{ vars.GOLANGCI_LINT_TIMEOUT || '5m' }}
+
+jobs:
+  title-check:
+    name: Title Check
+    runs-on: dedicated-runner
+    steps:
+      - name: Validate PR title
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            test
+            chore
+            ci
+            build
+            perf
+            revert
+          requireScope: false
+          subjectPattern: ^.{1,100}$
+          subjectPatternError: |
+            The subject must be between 1 and 100 characters long.
+
+  format-check:
+    name: Format Check
+    runs-on: dedicated-runner
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            app/api
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run gofmt
+        working-directory: app/api
+        run: |
+          if [ "$(gofmt -l . | wc -l)" -gt 0 ]; then
+            echo "Code is not formatted. Run 'go fmt ./...' to fix."
+            gofmt -d .
+            exit 1
+          fi
+
+  lint:
+    name: Lint
+    runs-on: dedicated-runner
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            app/api
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run go vet
+        working-directory: app/api
+        run: go vet ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+          working-directory: app/api
+          args: --timeout=${{ env.GOLANGCI_LINT_TIMEOUT }}
+
+  test:
+    name: Unit Tests
+    runs-on: dedicated-runner
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            app/api
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Download dependencies
+        working-directory: app/api
+        run: go mod download
+
+      - name: Run tests
+        working-directory: app/api
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: always
+        with:
+          file: ./app/api/coverage.out
+          flags: api
+          name: api-coverage
+
+  typecheck:
+    name: Type Check
+    runs-on: dedicated-runner
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            app/api
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Download dependencies
+        working-directory: app/api
+        run: go mod download
+
+      - name: Build (type check)
+        working-directory: app/api
+        run: go build -o /dev/null ./...
+
+  docker-build:
+    name: Docker Build
+    runs-on: dedicated-runner-dind
+    needs: [title-check, format-check, lint, test, typecheck]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            app/api
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        working-directory: app/api
+        run: |
+          docker build -t ${{ env.DOCKER_IMAGE_NAME }}:pr-${{ github.event.pull_request.number }} .
+
+  healthcheck:
+    name: Health Check
+    runs-on: dedicated-runner-dind
+    needs: [docker-build]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            app/api
+
+      - name: Build Docker image
+        working-directory: app/api
+        run: |
+          docker build -t ${{ env.DOCKER_IMAGE_NAME }}:pr-${{ github.event.pull_request.number }} .
+
+      - name: Run container
+        run: |
+          docker run -d --name ${{ env.CONTAINER_NAME }} -p ${{ env.API_PORT }}:${{ env.API_PORT }} \
+            -e POSTGRES_HOST=${{ env.POSTGRES_HOST }} \
+            -e POSTGRES_PORT=${{ env.POSTGRES_PORT }} \
+            -e POSTGRES_USER=${{ env.POSTGRES_USER }} \
+            -e POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }} \
+            -e POSTGRES_DB=${{ env.POSTGRES_DB }} \
+            -e NATS_URL=${{ env.NATS_URL }} \
+            ${{ env.DOCKER_IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}
+
+      - name: Wait for service to start
+        run: |
+          echo "Waiting for service to be ready..."
+          for i in $(seq 1 ${{ env.HEALTHCHECK_MAX_ATTEMPTS }}); do
+            # Check if container is still running
+            if ! docker ps | grep -q ${{ env.CONTAINER_NAME }}; then
+              echo "Container stopped unexpectedly!"
+              docker logs ${{ env.CONTAINER_NAME }}
+              exit 1
+            fi
+            # Try to reach health endpoint from host
+            if curl -f http://localhost:${{ env.API_PORT }}${{ env.API_HEALTH_ENDPOINT }} 2>/dev/null | grep -q "ok"; then
+              echo "Service is ready!"
+              exit 0
+            fi
+            echo "Attempt $i/${{ env.HEALTHCHECK_MAX_ATTEMPTS }}: Service not ready yet, waiting..."
+            sleep ${{ env.HEALTHCHECK_SLEEP_SECONDS }}
+          done
+          echo "Service failed to start within timeout"
+          docker logs ${{ env.CONTAINER_NAME }}
+          exit 1
+
+      - name: Health check
+        run: |
+          echo "Performing health check..."
+          response=$(curl -f http://localhost:${{ env.API_PORT }}${{ env.API_HEALTH_ENDPOINT }} 2>/dev/null)
+          if echo "$response" | grep -q "ok"; then
+            echo "✅ Health check passed! Response: $response"
+          else
+            echo "❌ Health check failed! Response: $response"
+            docker logs ${{ env.CONTAINER_NAME }}
+            exit 1
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop ${{ env.CONTAINER_NAME }} || true
+          docker rm ${{ env.CONTAINER_NAME }} || true
+
+  comment-pr:
+    name: Comment PR with Findings
+    runs-on: dedicated-runner
+    needs: [title-check, format-check, lint, test, typecheck, docker-build, healthcheck]
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Comment PR
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## 📋 App API PR Checks Summary
+
+            | Check | Status |
+            |-------|--------|
+            | **Title Check** | ${{ needs.title-check.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+            | **Format Check** | ${{ needs.format-check.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+            | **Lint** | ${{ needs.lint.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+            | **Unit Tests** | ${{ needs.test.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+            | **Type Check** | ${{ needs.typecheck.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+            | **Docker Build** | ${{ needs.docker-build.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+            | **Health Check** | ${{ needs.healthcheck.result == 'success' && '✅ Passed' || '❌ Failed' }} |
+
+            ### Details
+            - **Title Check**: Validates PR title follows Conventional Commits format (type: description)
+            - **Format Check**: Verifies code formatting with `gofmt`
+            - **Lint**: Runs `go vet` and `golangci-lint` for code quality
+            - **Unit Tests**: Executes tests with race detector and coverage
+            - **Type Check**: Validates type correctness with `go build`
+            - **Docker Build**: Ensures Docker image builds successfully
+            - **Health Check**: Verifies the container starts and responds to health checks
+
+            ${{ needs.title-check.result != 'success' && '⚠️ **Title Check failed** - PR title must follow format: `type: description` (e.g., `feat: add new endpoint`, `fix: resolve bug`). Valid types: feat, fix, docs, style, refactor, test, chore, ci, build, perf, revert.' || '' }}
+            ${{ needs.format-check.result != 'success' && '⚠️ **Format Check failed** - Run `go fmt ./...` to fix formatting issues.' || '' }}
+            ${{ needs.lint.result != 'success' && '⚠️ **Lint failed** - Review linting errors above.' || '' }}
+            ${{ needs.test.result != 'success' && '⚠️ **Tests failed** - Review test failures above.' || '' }}
+            ${{ needs.typecheck.result != 'success' && '⚠️ **Type Check failed** - Fix type errors to proceed.' || '' }}
+            ${{ needs.docker-build.result != 'success' && '⚠️ **Docker Build failed** - Fix Dockerfile or build issues.' || '' }}
+            ${{ needs.healthcheck.result != 'success' && '⚠️ **Health Check failed** - Container failed to start or health endpoint is not responding.' || '' }}
+
+            ${{ needs.title-check.result == 'success' && needs.format-check.result == 'success' && needs.lint.result == 'success' && needs.test.result == 'success' && needs.typecheck.result == 'success' && needs.docker-build.result == 'success' && needs.healthcheck.result == 'success' && '🎉 All checks passed! Ready for review.' || '' }}
+
