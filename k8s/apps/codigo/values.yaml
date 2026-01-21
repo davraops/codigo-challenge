@@ -15,7 +15,9 @@ postgres:
   image: postgres:16
   db: codigo
   user: codigo
-  password: codigo
+  # password: Set via secret - DO NOT commit passwords here
+  # Use: kubectl create secret generic postgres-password --from-literal=password=<secure-password> -n codigo
+  # Then reference in postgres.yaml via secretKeyRef
 
 nats:
   image: nats:2.10

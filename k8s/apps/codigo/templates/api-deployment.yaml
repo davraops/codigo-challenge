@@ -13,9 +13,24 @@ spec:
       labels:
         app: codigo-api
     spec:
+      serviceAccountName: codigo-api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534  # nobody user
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: api
           image: {{ .Values.images.api }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: {{ .Values.service.apiPort }}
           envFrom:
@@ -31,6 +46,11 @@ spec:
               value: {{ .Values.otel.collectorEndpoint | quote }}
             - name: SERVICE_NAME
               value: "codigo-api"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: var-run
+              mountPath: /var/run
           readinessProbe:
             httpGet:
               path: /readyz
@@ -50,3 +70,8 @@ spec:
             limits:
               cpu: "500m"
               memory: "512Mi"
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: var-run
+          emptyDir: {}

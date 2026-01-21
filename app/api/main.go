@@ -203,7 +203,12 @@ func mustDB(ctx context.Context) *pgxpool.Pool {
 	port := getenv("POSTGRES_PORT", "5432")
 	db := getenv("POSTGRES_DB", "codigo")
 	user := getenv("POSTGRES_USER", "codigo")
-	pass := getenv("POSTGRES_PASSWORD", "codigo")
+	// POSTGRES_PASSWORD must be set via environment variable (Kubernetes Secret)
+	// No default value for security - fail if not set
+	pass := os.Getenv("POSTGRES_PASSWORD")
+	if pass == "" {
+		panic("POSTGRES_PASSWORD environment variable is required")
+	}
 
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s", user, pass, host, port, db)
 	pool, err := pgxpool.New(ctx, dsn)
