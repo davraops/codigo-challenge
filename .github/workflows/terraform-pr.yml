@@ -20,6 +20,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            infra
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -67,6 +70,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            infra
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
