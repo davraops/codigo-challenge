@@ -2,6 +2,10 @@
 resource "google_service_account" "gke_nodes" {
   account_id   = "${var.name_prefix}-gke-nodes"
   display_name = "GKE nodes service account"
+
+  depends_on = [
+    google_project_service.required_apis
+  ]
 }
 
 resource "google_project_iam_member" "gke_nodes_logging" {

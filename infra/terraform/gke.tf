@@ -16,6 +16,10 @@ resource "google_container_cluster" "gke" {
   workload_identity_config {
     workload_pool = "${var.project_id}.svc.id.goog"
   }
+
+  depends_on = [
+    google_project_service.required_apis
+  ]
 }
 
 resource "google_container_node_pool" "primary_nodes" {

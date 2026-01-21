@@ -11,5 +11,11 @@ output "artifact_registry_repo" {
 }
 
 output "connect_command" {
-  value = "gcloud container clusters get-credentials ${google_container_cluster.gke.name} --region ${var.region} --project ${var.project_id}"
+  value       = "gcloud container clusters get-credentials ${google_container_cluster.gke.name} --region ${var.region} --project ${var.project_id}"
+  description = "Command to get kubeconfig and connect to the cluster"
+}
+
+output "project_id" {
+  value       = var.project_id
+  description = "GCP project ID"
 }
